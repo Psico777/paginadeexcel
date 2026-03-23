@@ -404,6 +404,30 @@ def crop_product_from_bbox(img_cv, bbox, img_w, img_h):
 # ============================================================
 # MAIN PUBLIC API (ENHANCED)
 # ============================================================
+def _is_good_bbox(bbox: dict, img_w: int, img_h: int) -> bool:
+    """
+    Check if a Gemini bbox is specific enough to be useful.
+    Rejects bboxes that cover too much of the image width
+    (Gemini default fallback when it's unsure about position).
+    """
+    if not bbox:
+        return False
+    w_pct = bbox.get("w_pct", 100)
+    h_pct = bbox.get("h_pct", 100)
+    x_pct = bbox.get("x_pct", 0)
+
+    # Reject if covers >80% width AND >60% height (too generic)
+    if w_pct > 80 and h_pct > 60:
+        return False
+    # Reject if basically full image
+    if w_pct > 90 and h_pct > 90:
+        return False
+    # Reject if x_pct=0 and w_pct>70% (Gemini gave up on horizontal position)
+    if x_pct < 2 and w_pct > 70:
+        return False
+    return True
+
+
 def detect_and_crop_products(
     source_path: str,
     product_uids: List[str],
@@ -453,8 +477,14 @@ def detect_and_crop_products(
         img_h_cv, img_w_cv = img_h, img_w
 
     # ---- Strategy 1: Gemini AI bboxes (from upstream) ----
+    # Only use bboxes that are specific enough (not generic fallbacks)
     ai_crop_count = 0
-    if bboxes_from_ai and img_cv is not None:
+    valid_ai_bboxes = 0
+    if bboxes_from_ai:
+        valid_ai_bboxes = sum(1 for b in bboxes_from_ai if _is_good_bbox(b, img_w_cv, img_h_cv))
+
+    if bboxes_from_ai and img_cv is not None and valid_ai_bboxes == len(product_uids):
+        # All bboxes look specific — trust Gemini fully
         for i, bbox in enumerate(bboxes_from_ai):
             if i >= len(product_uids) or bbox is None:
                 continue
@@ -464,8 +494,21 @@ def detect_and_crop_products(
                 if url:
                     results[i] = url
                     ai_crop_count += 1
-    if ai_crop_count > 0:
-        print(f"[CROP] Gemini AI bboxes: {ai_crop_count}/{len(product_uids)} crops")
+        if ai_crop_count > 0:
+            print(f"[CROP] Gemini AI bboxes (all valid): {ai_crop_count}/{len(product_uids)} crops")
+    elif bboxes_from_ai and img_cv is not None and valid_ai_bboxes > 0:
+        # Some bboxes are good, use them, skip the rest
+        for i, bbox in enumerate(bboxes_from_ai):
+            if i >= len(product_uids) or not _is_good_bbox(bbox, img_w_cv, img_h_cv):
+                continue
+            cropped = crop_product_from_bbox(img_cv, bbox, img_w_cv, img_h_cv)
+            if cropped is not None and cropped.size > 0:
+                url = _save_crop_cv(cropped, product_uids[i])
+                if url:
+                    results[i] = url
+                    ai_crop_count += 1
+        if ai_crop_count > 0:
+            print(f"[CROP] Gemini AI bboxes (partial {valid_ai_bboxes}/{len(product_uids)}): {ai_crop_count} crops")
 
     # ---- Strategy 2: ★ Ollama Vision (local AI, FREE) ----
     missing = [i for i in range(len(product_uids)) if results[i] is None]
