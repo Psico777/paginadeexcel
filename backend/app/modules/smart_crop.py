@@ -308,25 +308,44 @@ def _nms_bboxes(bboxes, overlap_thresh=0.35):
 # GRID SPLITTING
 # ============================================================
 def _grid_split(img_w, img_h, count):
+    """
+    Split image into grid matching image orientation.
+    For TALL images (portrait): horizontal strips (products stacked vertically)
+    For WIDE images (landscape): vertical strips
+    For square-ish: standard grid
+    """
     if count <= 0:
         return []
     if count == 1:
         return [(0, 0, img_w, img_h)]
 
     aspect = img_w / max(img_h, 1)
-    best_cols, best_rows = 1, count
-    best_diff = float("inf")
-    for cols in range(1, count + 1):
-        rows = int(np.ceil(count / cols))
-        diff = abs((cols / max(rows, 1)) - aspect)
-        if diff < best_diff:
-            best_diff = diff
-            best_cols, best_rows = cols, rows
+
+    # Portrait photo (taller than wide) — common in warehouse product photos
+    # Products are typically stacked top-to-bottom
+    if aspect < 0.85:
+        # Horizontal strips: 1 column, N rows
+        best_cols, best_rows = 1, count
+    # Landscape photo
+    elif aspect > 1.3:
+        # Vertical strips: N columns, 1 row
+        best_cols, best_rows = count, 1
+    else:
+        # Square-ish: find best grid
+        best_cols, best_rows = 1, count
+        best_diff = float("inf")
+        for cols in range(1, count + 1):
+            rows = int(np.ceil(count / cols))
+            diff = abs((cols / max(rows, 1)) - aspect)
+            if diff < best_diff:
+                best_diff = diff
+                best_cols, best_rows = cols, rows
 
     cell_w = img_w // best_cols
     cell_h = img_h // best_rows
-    pad_w = int(cell_w * 0.02)
-    pad_h = int(cell_h * 0.02)
+    # Overlap padding (5%) so products at borders aren't cut
+    pad_w = int(cell_w * 0.05)
+    pad_h = int(cell_h * 0.05)
 
     bboxes = []
     for r in range(best_rows):
@@ -345,7 +364,10 @@ def _grid_split(img_w, img_h, count):
 # BBOX-BASED CROP
 # ============================================================
 def crop_product_from_bbox(img_cv, bbox, img_w, img_h):
-    """Crop using bbox percentages (0-100 scale)."""
+    """
+    Crop using bbox percentages (0-100 scale).
+    Enhanced: validates crop area and uses adaptive padding.
+    """
     x_pct = bbox.get("x_pct", 0)
     y_pct = bbox.get("y_pct", 0)
     w_pct = bbox.get("w_pct", 100)
@@ -356,13 +378,24 @@ def crop_product_from_bbox(img_cv, bbox, img_w, img_h):
     w = int(w_pct / 100 * img_w)
     h = int(h_pct / 100 * img_h)
 
-    pad_x = int(w * 0.08)
-    pad_y = int(h * 0.08)
+    # Skip if bbox covers almost the entire image (bad detection)
+    if w_pct > 90 and h_pct > 90:
+        return None
+
+    # Adaptive padding: more for small crops, less for large ones
+    size_ratio = (w * h) / max(img_w * img_h, 1)
+    pad_factor = 0.12 if size_ratio < 0.15 else 0.06
+    pad_x = int(w * pad_factor)
+    pad_y = int(h * pad_factor)
+
     x1 = max(0, x - pad_x)
     y1 = max(0, y - pad_y)
     x2 = min(img_w, x + w + pad_x)
     y2 = min(img_h, y + h + pad_y)
 
+    # Minimum crop size
+    if x2 - x1 < 50 or y2 - y1 < 50:
+        return None
     if x2 <= x1 or y2 <= y1:
         return None
     return img_cv[y1:y2, x1:x2]
@@ -503,9 +536,34 @@ def detect_and_crop_products(
 
 
 def _save_crop_cv(cropped_cv, uid):
-    """Convert OpenCV crop to enhanced PIL thumbnail and save."""
+    """Convert OpenCV crop to enhanced PIL thumbnail and save.
+    Includes smart trimming to remove handwritten text margins."""
     try:
         pil_crop = PILImage.fromarray(cv2.cvtColor(cropped_cv, cv2.COLOR_BGR2RGB))
+        
+        # Smart trim: if the left portion is mostly white/empty (handwritten text area),
+        # crop it out to focus on the product
+        if HAS_CV2:
+            try:
+                gray = cv2.cvtColor(cropped_cv, cv2.COLOR_BGR2GRAY)
+                h, w = gray.shape[:2]
+                
+                # Check if left 30% is mostly empty (>70% white-ish pixels)
+                left_region = gray[:, :int(w * 0.3)]
+                white_ratio = np.sum(left_region > 200) / max(left_region.size, 1)
+                
+                if white_ratio > 0.60 and w > 200:
+                    # Find where the product actually starts (first column with significant content)
+                    col_means = np.mean(gray < 180, axis=0)  # dark pixel ratio per column
+                    product_cols = np.where(col_means > 0.15)[0]
+                    if len(product_cols) > 0:
+                        start_x = max(0, product_cols[0] - int(w * 0.03))
+                        if start_x > int(w * 0.1):  # only trim if meaningful
+                            cropped_cv = cropped_cv[:, start_x:]
+                            pil_crop = PILImage.fromarray(cv2.cvtColor(cropped_cv, cv2.COLOR_BGR2RGB))
+            except Exception:
+                pass  # If smart trim fails, continue with original crop
+        
         pil_crop = ImageEnhance.Sharpness(pil_crop).enhance(1.2)
         pil_crop = ImageEnhance.Contrast(pil_crop).enhance(1.1)
         pil_crop.thumbnail(THUMB_MAX, PILImage.LANCZOS)
