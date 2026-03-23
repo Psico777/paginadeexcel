@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Environment variables (secrets)
+backend/.env
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Uploads (user content)
+uploads/
+backend/uploads/
+
+# Node.js
+node_modules/
+frontend/node_modules/
+
+# Vite
+.vite/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Test outputs
+test_output.*
+test_*.pdf
