@@ -80,6 +80,28 @@ async def root():
     }
 
 
+# ============================================================
+# FRONTEND ESTÁTICO (React build)
+# ============================================================
+frontend_dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+if frontend_dist.exists():
+    from fastapi.responses import FileResponse
+    
+    app.mount("/assets", StaticFiles(directory=str(frontend_dist / "assets")), name="frontend-assets")
+    
+    @app.get("/app", include_in_schema=False)
+    @app.get("/app/{full_path:path}", include_in_schema=False)
+    async def serve_spa(full_path: str = ""):
+        file_path = frontend_dist / full_path
+        if full_path and file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(frontend_dist / "index.html")
+    
+    print(f"[FRONTEND] React app at http://localhost:8000/app")
+else:
+    print(f"[FRONTEND] No build found — run 'cd frontend && npm run build'")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
