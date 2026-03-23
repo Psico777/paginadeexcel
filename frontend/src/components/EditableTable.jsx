@@ -10,6 +10,7 @@ import {
   flexRender,
 } from '@tanstack/react-table';
 import { Pencil, Trash2 } from './Icons.jsx';
+import CropModal from './CropModal.jsx';
 
 // ============================================================
 // CELDA EDITABLE - Texto
@@ -103,7 +104,8 @@ function EditableNumberCell({ getValue, row, column, table }) {
 // ============================================================
 // COMPONENTE PRINCIPAL
 // ============================================================
-export default function EditableTable({ products, setProducts, exchangeRate, onDeleteProduct }) {
+export default function EditableTable({ products, setProducts, exchangeRate, onDeleteProduct, projectId }) {
+  const [cropProduct, setCropProduct] = useState(null);
 
   const recalculate = useCallback((rowIndex, columnId, value) => {
     setProducts((old) => {
@@ -164,14 +166,33 @@ export default function EditableTable({ products, setProducts, exchangeRate, onD
       header: 'PHOTO',
       accessorKey: 'photo_url',
       size: 80,
-      cell: ({ row }) => {
+      cell: ({ row, table }) => {
         const crop = row.original.crop_url;
         const photo = row.original.photo_url;
         const url = crop || photo;
-        return url ? (
-          <img src={url} alt="producto" className="table-thumb" />
-        ) : (
-          <div className="table-thumb-placeholder">📦</div>
+        const canCrop = !!(photo || crop);
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+            {url ? (
+              <img src={url} alt="producto" className="table-thumb" />
+            ) : (
+              <div className="table-thumb-placeholder">📦</div>
+            )}
+            {canCrop && (
+              <button
+                className="btn-crop"
+                onClick={() => table.options.meta?.openCrop(row.original)}
+                title="Recortar manualmente"
+                style={{
+                  fontSize: '10px', padding: '2px 6px', cursor: 'pointer',
+                  background: '#1a3a4a', border: '1px solid #00e5ff',
+                  borderRadius: '4px', color: '#00e5ff', whiteSpace: 'nowrap',
+                }}
+              >
+                ✂️ Recortar
+              </button>
+            )}
+          </div>
         );
       },
     },
@@ -278,6 +299,7 @@ export default function EditableTable({ products, setProducts, exchangeRate, onD
     getCoreRowModel: getCoreRowModel(),
     meta: {
       updateData: recalculate,
+      openCrop: (product) => setCropProduct(product),
     },
   });
 
@@ -297,7 +319,27 @@ export default function EditableTable({ products, setProducts, exchangeRate, onD
     { label: 'USD PRICE', colSpan: 2 },
   ];
 
+  const handleCropApplied = useCallback((newCropUrl) => {
+    if (!cropProduct) return;
+    setProducts((old) =>
+      old.map((p) =>
+        (p.id === cropProduct.id || p.uid === cropProduct.uid)
+          ? { ...p, crop_url: newCropUrl }
+          : p
+      )
+    );
+  }, [cropProduct, setProducts]);
+
   return (
+    <>
+      {cropProduct && (
+        <CropModal
+          product={cropProduct}
+          projectId={projectId}
+          onClose={() => setCropProduct(null)}
+          onCropApplied={handleCropApplied}
+        />
+      )}
     <div className="table-container">
       <div className="table-scroll">
         <table className="emfox-table">
@@ -357,5 +399,7 @@ export default function EditableTable({ products, setProducts, exchangeRate, onD
         <span>Total: $ {totalUSD.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span>
       </div>
     </div>
+  );
+    </>
   );
 }

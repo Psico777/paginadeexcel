@@ -27,7 +27,7 @@ from app.schemas import (
 from app.modules.gemini_vision import gemini_service
 from app.modules.business_logic import processor
 from app.modules.excel_export import generate_emfox_excel
-from app.modules.smart_crop import crop_product_from_image, create_thumbnail_from_full_image, detect_and_crop_products
+from app.modules.smart_crop import crop_product_from_image, create_thumbnail_from_full_image, detect_and_crop_products, manual_crop
 from app.modules.pdf_export import excel_to_pdf
 from app.ws_manager import ws_manager
 
@@ -201,6 +201,59 @@ async def update_product(project_id: int, product_uid: str, product: ProductRow,
     })
 
     return row_dict
+
+
+@router.post("/projects/{project_id}/products/{product_uid}/manual-crop")
+async def apply_manual_crop(project_id: int, product_uid: str, payload: dict, db: Session = Depends(get_db)):
+    """Apply a user-defined manual crop to a product image."""
+    x = int(payload.get("x", 0))
+    y = int(payload.get("y", 0))
+    width = int(payload.get("width", 0))
+    height = int(payload.get("height", 0))
+    source_url = payload.get("source_url", "")
+
+    if width <= 0 or height <= 0:
+        raise HTTPException(400, "Invalid crop dimensions")
+
+    # Resolve source_url to a local path
+    # source_url may be /uploads/... or /uploads/crops/...
+    local_path = None
+    if source_url.startswith("/uploads/"):
+        local_path = str(UPLOAD_DIR / source_url[len("/uploads/"):])
+    elif source_url.startswith("http"):
+        # Download to temp file
+        import tempfile, requests as _req
+        resp = _req.get(source_url, timeout=30)
+        resp.raise_for_status()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
+            tmp.write(resp.content)
+            local_path = tmp.name
+
+    if not local_path or not os.path.exists(local_path):
+        raise HTTPException(400, f"Source image not found: {source_url}")
+
+    try:
+        crop_url = manual_crop(local_path, x, y, width, height, product_uid)
+    except Exception as e:
+        raise HTTPException(500, f"Crop failed: {e}")
+
+    # Update DB
+    db_product = db.query(Product).filter(
+        Product.uid == product_uid, Product.project_id == project_id
+    ).first()
+    if not db_product:
+        raise HTTPException(404, "Producto no encontrado")
+
+    db_product.crop_url = crop_url
+    db.commit()
+    db.refresh(db_product)
+
+    await ws_manager.broadcast_to_room(project_id, {
+        "type": "product_updated",
+        "data": db_product.to_dict(),
+    })
+
+    return {"success": True, "crop_url": crop_url}
 
 
 @router.delete("/projects/{project_id}/products/{product_uid}")

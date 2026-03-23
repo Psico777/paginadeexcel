@@ -387,6 +387,7 @@ export default function App() {
                 setProducts={setProducts}
                 exchangeRate={exchangeRate}
                 onDeleteProduct={handleDeleteProduct}
+                projectId={activeProjectId}
               />
 
               <ExportPanel

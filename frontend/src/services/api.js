@@ -108,6 +108,14 @@ export async function exportToPdf(exportData) {
   window.URL.revokeObjectURL(url);
 }
 
+export async function manualCrop(projectId, productUid, cropData) {
+  const response = await api.post(
+    `/projects/${projectId}/products/${productUid}/manual-crop`,
+    cropData
+  );
+  return response.data;
+}
+
 // ============================================================
 // CONFIG
 // ============================================================

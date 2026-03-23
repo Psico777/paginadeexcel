@@ -620,6 +620,49 @@ def _save_crop_cv(cropped_cv, uid):
 
 
 # ============================================================
+# MANUAL CROP (user-defined coordinates)
+# ============================================================
+def manual_crop(source_path: str, x: int, y: int, width: int, height: int, product_uid: str) -> str:
+    """
+    Crop image at exact pixel coordinates provided by the user.
+    Args:
+        source_path: Local path to the source image
+        x, y: Top-left corner of the crop area
+        width, height: Dimensions of the crop area
+        product_uid: UID for naming the output file
+    Returns:
+        URL path to the saved crop (e.g. /uploads/crops/crop_<uid>.jpg)
+    """
+    try:
+        img = PILImage.open(source_path)
+        img_w, img_h = img.size
+
+        # Clamp to image bounds
+        x1 = max(0, int(x))
+        y1 = max(0, int(y))
+        x2 = min(img_w, int(x) + int(width))
+        y2 = min(img_h, int(y) + int(height))
+
+        if x2 <= x1 or y2 <= y1:
+            raise ValueError(f"Invalid crop region: ({x1},{y1})-({x2},{y2})")
+
+        cropped = img.crop((x1, y1, x2, y2))
+        # Light enhancement
+        cropped = ImageEnhance.Sharpness(cropped).enhance(1.2)
+        cropped = ImageEnhance.Contrast(cropped).enhance(1.05)
+        cropped.thumbnail(THUMB_MAX, PILImage.LANCZOS)
+
+        crop_name = f"crop_{product_uid}.jpg"
+        crop_path = CROP_DIR / crop_name
+        cropped.convert("RGB").save(crop_path, "JPEG", quality=92)
+        print(f"[CROP] Manual crop saved: {crop_path}")
+        return f"/uploads/crops/{crop_name}"
+    except Exception as e:
+        print(f"[CROP] manual_crop failed: {e}")
+        raise
+
+
+# ============================================================
 # LEGACY SINGLE-PRODUCT CROP
 # ============================================================
 def crop_product_from_image(source_path, bbox, product_uid):
