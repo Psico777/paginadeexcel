@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     ilovepdf_public_key: str = ""
     ilovepdf_secret_key: str = ""
 
+    # --- Ollama Local Vision (para smart crop sin gastar tokens) ---
+    ollama_url: str = "http://localhost:11434"
+    ollama_vision_model: str = "moondream"
+
     # --- Servidor ---
     upload_dir: str = "uploads"
     cors_origins: str = '["http://localhost:5173","http://localhost:3000"]'

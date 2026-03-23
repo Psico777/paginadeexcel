@@ -43,9 +43,14 @@ CROP_DIR.mkdir(parents=True, exist_ok=True)
 
 THUMB_MAX = (400, 400)
 
-# Ollama config
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
+# Ollama config (from settings)
+try:
+    from app.config import settings as _settings
+    OLLAMA_URL = _settings.ollama_url
+    OLLAMA_VISION_MODEL = _settings.ollama_vision_model
+except Exception:
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
 
 
 # ============================================================
