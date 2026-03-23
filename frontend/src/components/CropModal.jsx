@@ -1,42 +1,76 @@
 /**
- * EMFOX OMS - CropModal
- * Interactive manual crop selector for product images.
- * Uses mouse drag on a canvas overlay to select a crop region.
+ * EMFOX OMS - CropModal v2
+ * Fixed: canvas coordinates now always match displayed image pixels.
+ * Approach: draw image directly on canvas (no separate img tag), 
+ * so canvas pixels = image pixels after scaling. No timing issues.
  */
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 
 export default function CropModal({ product, projectId, onClose, onCropApplied }) {
-  const imgRef = useRef(null);
   const canvasRef = useRef(null);
-  const [imgNaturalSize, setImgNaturalSize] = useState({ w: 1, h: 1 });
-  const [imgRendered, setImgRendered] = useState({ w: 1, h: 1, left: 0, top: 0 });
+  const [imgNatural, setImgNatural] = useState({ w: 0, h: 0 });
+  const [scale, setScale] = useState(1);          // canvas px / image px
   const [dragging, setDragging] = useState(false);
   const [startPt, setStartPt] = useState(null);
-  const [rect, setRect] = useState(null); // { x, y, w, h } in canvas coords
+  const [rect, setRect] = useState(null);          // in canvas coords
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [imgLoaded, setImgLoaded] = useState(false);
+  const imgObjRef = useRef(null);
 
   const sourceUrl = product.photo_url || product.crop_url;
 
-  // Redraw canvas overlay
+  // ── Load image and draw on canvas ──────────────────────────
+  useEffect(() => {
+    const img = new Image();
+    img.onload = () => {
+      imgObjRef.current = img;
+      setImgNatural({ w: img.naturalWidth, h: img.naturalHeight });
+
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+
+      // Fit image inside 80vw × 70vh while keeping aspect ratio
+      const maxW = Math.min(window.innerWidth * 0.82, 900);
+      const maxH = window.innerHeight * 0.68;
+      const scaleW = maxW / img.naturalWidth;
+      const scaleH = maxH / img.naturalHeight;
+      const s = Math.min(scaleW, scaleH, 1); // never upscale
+
+      canvas.width  = Math.round(img.naturalWidth  * s);
+      canvas.height = Math.round(img.naturalHeight * s);
+      setScale(s);
+
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      setImgLoaded(true);
+      setRect(null);
+    };
+    img.onerror = () => setError('No se pudo cargar la imagen.');
+    img.src = sourceUrl;
+  }, [sourceUrl]);
+
+  // ── Redraw canvas (image + selection) ─────────────────────
   const redraw = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const img = imgObjRef.current;
+    if (!canvas || !img || !imgLoaded) return;
     const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    if (!rect || rect.w === 0 || rect.h === 0) return;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-    const { x, y, w, h } = rect;
-    const nx = w < 0 ? x + w : x;
-    const ny = h < 0 ? y + h : y;
-    const nw = Math.abs(w);
-    const nh = Math.abs(h);
+    if (!rect || Math.abs(rect.w) < 2 || Math.abs(rect.h) < 2) return;
 
-    // Darken outside
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
+    const nx = rect.w < 0 ? rect.x + rect.w : rect.x;
+    const ny = rect.h < 0 ? rect.y + rect.h : rect.y;
+    const nw = Math.abs(rect.w);
+    const nh = Math.abs(rect.h);
+
+    // Darken outside selection
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.clearRect(nx, ny, nw, nh);
+    ctx.drawImage(img, nx / scale, ny / scale,
+      nw / scale, nh / scale, nx, ny, nw, nh);
 
     // Border
     ctx.strokeStyle = '#00e5ff';
@@ -51,82 +85,58 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
     [[nx, ny], [nx + nw, ny], [nx, ny + nh], [nx + nw, ny + nh]].forEach(([cx, cy]) => {
       ctx.fillRect(cx - sz / 2, cy - sz / 2, sz, sz);
     });
-  }, [rect]);
+  }, [rect, imgLoaded, scale]);
 
   useEffect(() => { redraw(); }, [rect, redraw]);
 
-  // Sync canvas size when image loads
-  const handleImgLoad = () => {
-    const img = imgRef.current;
-    if (!img) return;
-    setImgNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
-    // Delay to ensure the modal layout is fully rendered before measuring
-    setTimeout(() => syncCanvasSize(), 50);
-  };
-
-  const syncCanvasSize = () => {
-    const img = imgRef.current;
-    const canvas = canvasRef.current;
-    if (!img || !canvas) return;
-    const renderedRect = img.getBoundingClientRect();
-    // Guard: if layout not ready yet, retry
-    if (renderedRect.width === 0) {
-      setTimeout(() => syncCanvasSize(), 100);
-      return;
-    }
-    canvas.width = renderedRect.width;
-    canvas.height = renderedRect.height;
-    setImgRendered({ w: renderedRect.width, h: renderedRect.height, left: renderedRect.left, top: renderedRect.top });
-  };
-
-  useEffect(() => {
-    window.addEventListener('resize', syncCanvasSize);
-    return () => window.removeEventListener('resize', syncCanvasSize);
-  }, []);
-
+  // ── Mouse events ───────────────────────────────────────────
   const getCanvasCoords = (e) => {
     const canvas = canvasRef.current;
     const r = canvas.getBoundingClientRect();
+    // Correct for CSS scaling (canvas may be displayed smaller than its pixel size)
+    const cssToPixel = canvas.width / r.width;
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    return { x: clientX - r.left, y: clientY - r.top };
+    return {
+      x: (clientX - r.left) * cssToPixel,
+      y: (clientY - r.top)  * cssToPixel,
+    };
   };
 
   const onMouseDown = (e) => {
+    if (!imgLoaded) return;
     e.preventDefault();
     const pt = getCanvasCoords(e);
     setStartPt(pt);
-    setDragging(true);
     setRect({ x: pt.x, y: pt.y, w: 0, h: 0 });
+    setDragging(true);
   };
 
   const onMouseMove = (e) => {
     if (!dragging || !startPt) return;
+    e.preventDefault();
     const pt = getCanvasCoords(e);
     setRect({ x: startPt.x, y: startPt.y, w: pt.x - startPt.x, h: pt.y - startPt.y });
   };
 
-  const onMouseUp = () => {
+  const onMouseUp = (e) => {
+    if (!dragging) return;
+    e.preventDefault();
     setDragging(false);
   };
 
-  // Convert canvas rect to image natural coords
+  // ── Compute image-space coordinates ───────────────────────
   const getImageCoords = () => {
-    if (!rect) return null;
-    const canvas = canvasRef.current;
-    const scaleX = imgNaturalSize.w / canvas.width;
-    const scaleY = imgNaturalSize.h / canvas.height;
-
+    if (!rect || Math.abs(rect.w) < 5 || Math.abs(rect.h) < 5) return null;
     const nx = rect.w < 0 ? rect.x + rect.w : rect.x;
     const ny = rect.h < 0 ? rect.y + rect.h : rect.y;
     const nw = Math.abs(rect.w);
     const nh = Math.abs(rect.h);
-
     return {
-      x: Math.round(nx * scaleX),
-      y: Math.round(ny * scaleY),
-      width: Math.round(nw * scaleX),
-      height: Math.round(nh * scaleY),
+      x:      Math.round(nx / scale),
+      y:      Math.round(ny / scale),
+      width:  Math.round(nw / scale),
+      height: Math.round(nh / scale),
     };
   };
 
@@ -148,7 +158,6 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
         height: coords.height,
         source_url: sourceUrl,
       });
-      // Close first, then update parent state — prevents remount conflicts
       onClose();
       onCropApplied(result.crop_url);
     } catch (err) {
@@ -167,32 +176,27 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
         </div>
 
         <div style={styles.instructions}>
-          Arrastra sobre la imagen para seleccionar el área a recortar
+          {imgLoaded ? 'Arrastra para seleccionar el área del producto' : '⏳ Cargando imagen...'}
         </div>
 
-        <div style={styles.imgWrapper}>
-          <img
-            ref={imgRef}
-            src={sourceUrl}
-            alt="original"
-            style={styles.img}
-            onLoad={handleImgLoad}
-            draggable={false}
-          />
+        <div style={styles.canvasWrapper}>
           <canvas
             ref={canvasRef}
-            style={styles.canvas}
+            style={{ ...styles.canvas, cursor: imgLoaded ? 'crosshair' : 'wait' }}
             onMouseDown={onMouseDown}
             onMouseMove={onMouseMove}
             onMouseUp={onMouseUp}
             onMouseLeave={onMouseUp}
+            onTouchStart={onMouseDown}
+            onTouchMove={onMouseMove}
+            onTouchEnd={onMouseUp}
           />
         </div>
 
         <div style={styles.coordsBar}>
           {coords && coords.width > 0
-            ? `📐 x:${coords.x} y:${coords.y} — ${coords.width}×${coords.height}px`
-            : 'Arrastra para seleccionar región'}
+            ? `📐 x:${coords.x} y:${coords.y} — ${coords.width}×${coords.height}px (imagen: ${imgNatural.w}×${imgNatural.h})`
+            : imgLoaded ? 'Arrastra para seleccionar región' : '...'}
         </div>
 
         {error && <div style={styles.error}>{error}</div>}
@@ -202,7 +206,7 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
             Cancelar
           </button>
           <button
-            style={{ ...styles.applyBtn, opacity: loading ? 0.6 : 1 }}
+            style={{ ...styles.applyBtn, opacity: (loading || !coords || coords.width < 10) ? 0.5 : 1 }}
             onClick={handleApply}
             disabled={loading || !coords || coords.width < 10}
           >
@@ -216,34 +220,22 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
 
 const styles = {
   overlay: {
-    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
+    position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
     zIndex: 9999, padding: '16px',
   },
   modal: {
     background: '#1a1a2e', border: '1px solid #2d2d4e', borderRadius: '12px',
     display: 'flex', flexDirection: 'column', gap: '12px',
-    maxWidth: '90vw', maxHeight: '90vh', overflow: 'hidden',
-    padding: '16px', minWidth: '320px',
+    maxWidth: '92vw', maxHeight: '95vh', overflow: 'hidden',
+    padding: '16px',
   },
-  header: {
-    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-  },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
   title: { color: '#00e5ff', fontWeight: 700, fontSize: '16px' },
-  closeBtn: {
-    background: 'none', border: 'none', color: '#aaa', fontSize: '18px',
-    cursor: 'pointer', padding: '2px 6px',
-  },
+  closeBtn: { background: 'none', border: 'none', color: '#aaa', fontSize: '20px', cursor: 'pointer' },
   instructions: { color: '#ccc', fontSize: '13px' },
-  imgWrapper: {
-    position: 'relative', display: 'inline-block',
-    maxHeight: '60vh', overflow: 'auto',
-  },
-  img: { display: 'block', maxWidth: '100%', maxHeight: '60vh', userSelect: 'none' },
-  canvas: {
-    position: 'absolute', inset: 0, cursor: 'crosshair',
-    width: '100%', height: '100%',
-  },
+  canvasWrapper: { overflow: 'auto', maxHeight: '68vh', borderRadius: '6px', background: '#000' },
+  canvas: { display: 'block', maxWidth: '100%' },
   coordsBar: {
     color: '#7ec8e3', fontSize: '12px', fontFamily: 'monospace',
     background: '#0d0d1a', padding: '6px 10px', borderRadius: '6px',
@@ -256,7 +248,6 @@ const styles = {
   },
   applyBtn: {
     padding: '8px 18px', borderRadius: '8px', border: 'none',
-    background: '#00e5ff', color: '#000', cursor: 'pointer', fontSize: '14px',
-    fontWeight: 700,
+    background: '#00e5ff', color: '#000', cursor: 'pointer', fontSize: '14px', fontWeight: 700,
   },
 };
