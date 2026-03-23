@@ -148,8 +148,9 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
         height: coords.height,
         source_url: sourceUrl,
       });
-      onCropApplied(result.crop_url);
+      // Close first, then update parent state — prevents remount conflicts
       onClose();
+      onCropApplied(result.crop_url);
     } catch (err) {
       setError(err?.response?.data?.detail || 'Error al aplicar recorte.');
     } finally {

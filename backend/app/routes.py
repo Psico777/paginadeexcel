@@ -248,10 +248,9 @@ async def apply_manual_crop(project_id: int, product_uid: str, payload: dict, db
     db.commit()
     db.refresh(db_product)
 
-    await ws_manager.broadcast_to_room(project_id, {
-        "type": "product_updated",
-        "data": db_product.to_dict(),
-    })
+    # Note: Don't broadcast product_updated via WS here —
+    # the frontend handles the crop_url update directly via onCropApplied callback.
+    # Broadcasting would cause a state conflict and page remount.
 
     return {"success": True, "crop_url": crop_url}
 
