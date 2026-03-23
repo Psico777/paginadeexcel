@@ -1,14 +1,21 @@
 """
-EMFOX OMS v2.2 - Smart Crop Module (Improved)
-================================================
-Primary strategy: Use Gemini bounding boxes to crop products.
-Secondary: OpenCV with multiple detection pipelines.
-Fallback: Intelligent grid splitting based on expected count.
-Last resort: Full-image thumbnail.
+EMFOX OMS v3.0 - Smart Crop Module (AI-Enhanced with Local Vision)
+===================================================================
+Enhanced product detection pipeline:
+  1. Ollama Vision (moondream) — local AI bounding box detection (0 API cost)
+  2. Gemini AI bboxes (if available from upstream)
+  3. OpenCV multi-strategy contour detection
+  4. Intelligent grid splitting
+  5. Full-image thumbnail fallback
+
+Optimized for: 2GB VRAM (MX230) + 32GB RAM
 """
 
 import os
+import json
 import uuid
+import base64
+import subprocess
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -17,7 +24,7 @@ from PIL import Image as PILImage, ImageFilter, ImageEnhance
 
 from app.config import settings
 
-# Try to import OpenCV
+# Try imports
 try:
     import cv2
     HAS_CV2 = True
@@ -25,14 +32,146 @@ except ImportError:
     HAS_CV2 = False
     print("[CROP] OpenCV not available")
 
+try:
+    import requests as http_requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
 CROP_DIR = Path(settings.upload_dir) / "crops"
 CROP_DIR.mkdir(parents=True, exist_ok=True)
 
 THUMB_MAX = (400, 400)
 
+# Ollama config
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "moondream")
+
 
 # ============================================================
-# OPENCV DETECTION PIPELINE (improved multi-strategy)
+# OLLAMA VISION - LOCAL AI DETECTION (FREE, NO API COST)
+# ============================================================
+def _detect_with_ollama_vision(image_path: str, expected_count: int = 0) -> List[dict]:
+    """
+    Use Ollama Vision (moondream) to detect product bounding boxes.
+    Returns list of bbox dicts: [{x_pct, y_pct, w_pct, h_pct}, ...]
+    
+    This runs 100% locally — zero API cost, zero tokens burned.
+    """
+    if not HAS_REQUESTS:
+        print("[CROP] requests library not available for Ollama")
+        return []
+
+    try:
+        # Convert image to base64
+        with open(image_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        count_hint = f" I expect approximately {expected_count} products." if expected_count > 0 else ""
+
+        prompt = f"""Look at this image carefully. It contains multiple products/items displayed together.{count_hint}
+
+For EACH distinct product/item visible in the image, give me the bounding box coordinates as percentages of the image dimensions.
+
+Respond ONLY with a JSON array. Each element should have:
+- "x_pct": left edge as percentage (0-100) of image width
+- "y_pct": top edge as percentage (0-100) of image height  
+- "w_pct": width as percentage (0-100) of image width
+- "h_pct": height as percentage (0-100) of image height
+- "label": brief description of the product
+
+Example response:
+[{{"x_pct": 5, "y_pct": 10, "w_pct": 45, "h_pct": 80, "label": "blue stuffed animal"}}, {{"x_pct": 52, "y_pct": 8, "w_pct": 43, "h_pct": 82, "label": "red toy car"}}]
+
+Respond ONLY with the JSON array, no other text."""
+
+        response = http_requests.post(
+            f"{OLLAMA_URL}/api/generate",
+            json={
+                "model": OLLAMA_VISION_MODEL,
+                "prompt": prompt,
+                "images": [img_b64],
+                "stream": False,
+                "options": {
+                    "temperature": 0.1,
+                    "num_predict": 1024,
+                }
+            },
+            timeout=60
+        )
+
+        if response.status_code != 200:
+            print(f"[CROP] Ollama returned {response.status_code}")
+            return []
+
+        result = response.json()
+        text = result.get("response", "").strip()
+        
+        # Extract JSON from response
+        bboxes = _parse_bbox_json(text)
+        
+        if bboxes:
+            print(f"[CROP] Ollama Vision detected {len(bboxes)} products")
+            # Validate and clamp values
+            validated = []
+            for bb in bboxes:
+                try:
+                    validated.append({
+                        "x_pct": max(0, min(100, float(bb.get("x_pct", 0)))),
+                        "y_pct": max(0, min(100, float(bb.get("y_pct", 0)))),
+                        "w_pct": max(5, min(100, float(bb.get("w_pct", 50)))),
+                        "h_pct": max(5, min(100, float(bb.get("h_pct", 50)))),
+                    })
+                except (ValueError, TypeError):
+                    continue
+            return validated
+        
+        print("[CROP] Ollama Vision: could not parse bboxes from response")
+        return []
+
+    except http_requests.exceptions.ConnectionError:
+        print("[CROP] Ollama not running — skipping local vision")
+        return []
+    except Exception as e:
+        print(f"[CROP] Ollama Vision error: {e}")
+        return []
+
+
+def _parse_bbox_json(text: str) -> list:
+    """Extract JSON array from AI response, handling common formatting issues."""
+    # Try direct parse
+    try:
+        result = json.loads(text)
+        if isinstance(result, list):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    # Find JSON array in text
+    import re
+    matches = re.findall(r'\[[\s\S]*?\]', text)
+    for match in matches:
+        try:
+            result = json.loads(match)
+            if isinstance(result, list) and len(result) > 0:
+                return result
+        except json.JSONDecodeError:
+            continue
+
+    # Try fixing common issues
+    text_clean = text.replace("'", '"').replace("True", "true").replace("False", "false")
+    try:
+        result = json.loads(text_clean)
+        if isinstance(result, list):
+            return result
+    except json.JSONDecodeError:
+        pass
+
+    return []
+
+
+# ============================================================
+# OPENCV DETECTION PIPELINE (multi-strategy, unchanged)
 # ============================================================
 def _detect_contours(img_cv, expected_count: int = 0) -> List[Tuple[int, int, int, int]]:
     """Multi-strategy contour detection for warehouse/showroom photos."""
@@ -52,7 +191,7 @@ def _detect_contours(img_cv, expected_count: int = 0) -> List[Tuple[int, int, in
             return 10000 + len(bboxes)
         return len(bboxes) - abs(len(bboxes) - target) * 2
 
-    # Strategy 1: Canny edge detection with various params
+    # Strategy 1: Canny edge detection
     canny_params = [
         (5, 30, 90, 2), (7, 40, 120, 3), (5, 50, 150, 2),
         (9, 20, 80, 4), (7, 60, 180, 2), (11, 30, 100, 3),
@@ -101,7 +240,7 @@ def _detect_contours(img_cv, expected_count: int = 0) -> List[Tuple[int, int, in
         best_score = score
         best_bboxes = adapt_bboxes
 
-    # Strategy 4: Color-based (HSV saturation) — good for colorful products
+    # Strategy 4: Color-based (HSV saturation)
     hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
     _, sat_thresh = cv2.threshold(hsv[:, :, 1], 50, 255, cv2.THRESH_BINARY)
     kernel = np.ones((9, 9), np.uint8)
@@ -113,7 +252,6 @@ def _detect_contours(img_cv, expected_count: int = 0) -> List[Tuple[int, int, in
     if score > best_score:
         best_bboxes = sat_bboxes
 
-    # Sort: top-to-bottom, left-to-right
     row_height = max(1, h // 4)
     best_bboxes.sort(key=lambda b: (b[1] // row_height, b[0]))
     print(f"[CROP] OpenCV detected {len(best_bboxes)} regions (expected {expected_count})")
@@ -121,7 +259,6 @@ def _detect_contours(img_cv, expected_count: int = 0) -> List[Tuple[int, int, in
 
 
 def _filter_bboxes(contours, min_area, max_area, min_dim, img_w, img_h):
-    """Filter contours to valid product-sized bounding boxes."""
     bboxes = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -138,7 +275,6 @@ def _filter_bboxes(contours, min_area, max_area, min_dim, img_w, img_h):
 
 
 def _nms_bboxes(bboxes, overlap_thresh=0.35):
-    """Non-max suppression to remove overlapping detections."""
     if not bboxes:
         return []
     boxes = np.array(bboxes)
@@ -164,10 +300,9 @@ def _nms_bboxes(bboxes, overlap_thresh=0.35):
 
 
 # ============================================================
-# GRID SPLITTING (improved aspect-ratio-aware)
+# GRID SPLITTING
 # ============================================================
 def _grid_split(img_w, img_h, count):
-    """Split image into grid matching image aspect ratio."""
     if count <= 0:
         return []
     if count == 1:
@@ -202,10 +337,10 @@ def _grid_split(img_w, img_h, count):
 
 
 # ============================================================
-# BBOX-BASED CROP (from Gemini AI percentages)
+# BBOX-BASED CROP
 # ============================================================
 def crop_product_from_bbox(img_cv, bbox, img_w, img_h):
-    """Crop using Gemini bbox percentages (0-100 scale)."""
+    """Crop using bbox percentages (0-100 scale)."""
     x_pct = bbox.get("x_pct", 0)
     y_pct = bbox.get("y_pct", 0)
     w_pct = bbox.get("w_pct", 100)
@@ -216,7 +351,6 @@ def crop_product_from_bbox(img_cv, bbox, img_w, img_h):
     w = int(w_pct / 100 * img_w)
     h = int(h_pct / 100 * img_h)
 
-    # 8% padding for better framing
     pad_x = int(w * 0.08)
     pad_y = int(h * 0.08)
     x1 = max(0, x - pad_x)
@@ -230,7 +364,7 @@ def crop_product_from_bbox(img_cv, bbox, img_w, img_h):
 
 
 # ============================================================
-# MAIN PUBLIC API
+# MAIN PUBLIC API (ENHANCED)
 # ============================================================
 def detect_and_crop_products(
     source_path: str,
@@ -241,11 +375,12 @@ def detect_and_crop_products(
     """
     Detect and crop individual products from a group photo.
 
-    Priority:
-      1. Gemini AI bounding boxes (if provided)
-      2. OpenCV multi-strategy contour detection
-      3. Grid-based splitting
-      4. Full-image thumbnail
+    ENHANCED Priority:
+      1. Gemini AI bounding boxes (if provided from upstream)
+      2. ★ NEW: Ollama Vision (moondream) — local AI detection, FREE
+      3. OpenCV multi-strategy contour detection
+      4. Grid-based splitting
+      5. Full-image thumbnail
 
     Args:
         source_path: Path to source image
@@ -279,7 +414,7 @@ def detect_and_crop_products(
     else:
         img_h_cv, img_w_cv = img_h, img_w
 
-    # ---- Strategy 1: Gemini AI bboxes ----
+    # ---- Strategy 1: Gemini AI bboxes (from upstream) ----
     ai_crop_count = 0
     if bboxes_from_ai and img_cv is not None:
         for i, bbox in enumerate(bboxes_from_ai):
@@ -292,9 +427,25 @@ def detect_and_crop_products(
                     results[i] = url
                     ai_crop_count += 1
     if ai_crop_count > 0:
-        print(f"[CROP] AI bboxes: {ai_crop_count}/{len(product_uids)} crops")
+        print(f"[CROP] Gemini AI bboxes: {ai_crop_count}/{len(product_uids)} crops")
 
-    # ---- Strategy 2: OpenCV for remaining ----
+    # ---- Strategy 2: ★ Ollama Vision (local AI, FREE) ----
+    missing = [i for i in range(len(product_uids)) if results[i] is None]
+    if missing and img_cv is not None:
+        ollama_bboxes = _detect_with_ollama_vision(source_path, expected_count=len(missing))
+        if len(ollama_bboxes) >= len(missing):
+            for j, idx in enumerate(missing):
+                if j < len(ollama_bboxes):
+                    cropped = crop_product_from_bbox(img_cv, ollama_bboxes[j], img_w_cv, img_h_cv)
+                    if cropped is not None and cropped.size > 0:
+                        url = _save_crop_cv(cropped, product_uids[idx])
+                        if url:
+                            results[idx] = url
+            ollama_done = sum(1 for i in missing if results[i] is not None)
+            if ollama_done > 0:
+                print(f"[CROP] Ollama Vision: {ollama_done}/{len(missing)} crops")
+
+    # ---- Strategy 3: OpenCV for remaining ----
     missing = [i for i in range(len(product_uids)) if results[i] is None]
     if missing and img_cv is not None and HAS_CV2:
         try:
@@ -316,7 +467,7 @@ def detect_and_crop_products(
         except Exception as e:
             print(f"[CROP] OpenCV detection failed: {e}")
 
-    # ---- Strategy 3: Grid split for remaining ----
+    # ---- Strategy 4: Grid split for remaining ----
     missing = [i for i in range(len(product_uids)) if results[i] is None]
     if missing:
         grid_bboxes = _grid_split(img_w, img_h, len(missing))
@@ -333,10 +484,15 @@ def detect_and_crop_products(
                 except Exception as e:
                     print(f"[CROP] Grid crop failed: {e}")
 
-    # ---- Strategy 4: Thumbnail fallback ----
+    # ---- Strategy 5: Thumbnail fallback ----
     for i in range(len(product_uids)):
         if results[i] is None:
             results[i] = create_thumbnail_from_full_image(source_path, product_uids[i])
+
+    # Clean up: delete original if ALL crops succeeded
+    all_cropped = all(r is not None and "crop_" in r for r in results)
+    if all_cropped and len(results) > 1:
+        print(f"[CROP] ✅ All {len(results)} products cropped — original can be replaced in UI")
 
     return results
 
