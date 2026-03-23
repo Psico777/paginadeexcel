@@ -1,0 +1,11 @@
+{
+  "total": 200,
+  "train": 160,
+  "val": 40,
+  "classes": [
+    "product"
+  ],
+  "format": "YOLO v8",
+  "ready_to_train": true,
+  "train_command": "yolo detect train data=dataset/dataset.yaml model=yolov8n.pt epochs=50 imgsz=640"
+}

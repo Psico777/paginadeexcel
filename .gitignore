@@ -49,3 +49,4 @@ Desktop.ini
 # Test outputs
 test_output.*
 test_*.pdf
+dataset/

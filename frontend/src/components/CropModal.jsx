@@ -60,17 +60,23 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
     const img = imgRef.current;
     if (!img) return;
     setImgNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
-    syncCanvasSize();
+    // Delay to ensure the modal layout is fully rendered before measuring
+    setTimeout(() => syncCanvasSize(), 50);
   };
 
   const syncCanvasSize = () => {
     const img = imgRef.current;
     const canvas = canvasRef.current;
     if (!img || !canvas) return;
-    const rect = img.getBoundingClientRect();
-    canvas.width = rect.width;
-    canvas.height = rect.height;
-    setImgRendered({ w: rect.width, h: rect.height, left: rect.left, top: rect.top });
+    const renderedRect = img.getBoundingClientRect();
+    // Guard: if layout not ready yet, retry
+    if (renderedRect.width === 0) {
+      setTimeout(() => syncCanvasSize(), 100);
+      return;
+    }
+    canvas.width = renderedRect.width;
+    canvas.height = renderedRect.height;
+    setImgRendered({ w: renderedRect.width, h: renderedRect.height, left: renderedRect.left, top: renderedRect.top });
   };
 
   useEffect(() => {
