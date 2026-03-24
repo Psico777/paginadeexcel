@@ -164,6 +164,24 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
         height: coords.height,
         source_url: sourceUrl,
       });
+
+      // Auto-save as YOLO training label (fire and forget)
+      try {
+        const api = (await import('../services/api.js')).default || 
+                    (await import('../services/api.js'));
+        const saveLabel = api.post || fetch;
+        await fetch(`/api/projects/${pid}/products/${product.id || product.uid}/save-training-label`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            x: coords.x, y: coords.y,
+            width: coords.width, height: coords.height,
+            source_url: sourceUrl,
+            img_width: imgNatural.w, img_height: imgNatural.h,
+          }),
+        });
+      } catch (_) { /* training label save is best-effort */ }
+
       onClose();
       onCropApplied(result.crop_url);
     } catch (err) {

@@ -626,3 +626,164 @@ async def websocket_endpoint(
     except Exception as e:
         print(f"[WS] Error: {e}")
         await ws_manager.disconnect(websocket, project_id)
+
+
+# ============================================================
+# AUTO-LABEL: Save manual crops as YOLO training data
+# ============================================================
+@router.post("/projects/{project_id}/products/{product_uid}/save-training-label")
+async def save_training_label(project_id: int, product_uid: str, payload: dict, db: Session = Depends(get_db)):
+    """Save manual crop coordinates as YOLO label for training data."""
+    import shutil
+    
+    x = int(payload.get("x", 0))
+    y = int(payload.get("y", 0))
+    width = int(payload.get("width", 0))
+    height = int(payload.get("height", 0))
+    source_url = payload.get("source_url", "")
+    img_w = int(payload.get("img_width", 1))
+    img_h = int(payload.get("img_height", 1))
+
+    if width <= 0 or height <= 0 or img_w <= 0 or img_h <= 0:
+        return {"success": False, "message": "Invalid dimensions"}
+
+    TRAIN_DIR = Path(os.path.expanduser("~/Escritorio/FOX_TRAIN_DATA"))
+    TRAIN_DIR.mkdir(parents=True, exist_ok=True)
+    (TRAIN_DIR / "images").mkdir(exist_ok=True)
+    (TRAIN_DIR / "labels").mkdir(exist_ok=True)
+
+    # Resolve source image
+    local_path = None
+    if source_url.startswith("/uploads/"):
+        local_path = str(UPLOAD_DIR / source_url[len("/uploads/"):])
+    
+    if not local_path or not os.path.exists(local_path):
+        return {"success": False, "message": "Source image not found"}
+
+    # Copy source image to training dir (use hash to avoid duplicates)
+    import hashlib
+    with open(local_path, "rb") as f:
+        file_hash = hashlib.md5(f.read()[:4096]).hexdigest()[:10]
+    
+    img_name = f"yiwu_{file_hash}"
+    img_dest = TRAIN_DIR / "images" / f"{img_name}.jpg"
+    label_dest = TRAIN_DIR / "labels" / f"{img_name}.txt"
+    
+    if not img_dest.exists():
+        shutil.copy2(local_path, img_dest)
+
+    # Convert pixel coords to YOLO format: class cx cy w h (normalized 0-1)
+    cx = (x + width / 2) / img_w
+    cy = (y + height / 2) / img_h
+    nw = width / img_w
+    nh = height / img_h
+
+    # Append (one image can have multiple products)
+    with open(label_dest, "a") as f:
+        f.write(f"0 {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}\n")
+
+    label_count = sum(1 for _ in open(label_dest))
+    total_images = len(list((TRAIN_DIR / "images").glob("*.jpg")))
+    total_labels = sum(
+        sum(1 for _ in open(lf))
+        for lf in (TRAIN_DIR / "labels").glob("*.txt")
+    )
+
+    return {
+        "success": True,
+        "message": f"Label guardado ({label_count} productos en esta imagen)",
+        "stats": {
+            "total_images": total_images,
+            "total_labels": total_labels,
+            "ready_to_train": total_labels >= 50
+        }
+    }
+
+
+@router.get("/training-stats")
+async def training_stats():
+    """Get current training dataset statistics."""
+    TRAIN_DIR = Path(os.path.expanduser("~/Escritorio/FOX_TRAIN_DATA"))
+    images_dir = TRAIN_DIR / "images"
+    labels_dir = TRAIN_DIR / "labels"
+    
+    if not images_dir.exists():
+        return {"total_images": 0, "total_labels": 0, "ready_to_train": False}
+    
+    total_images = len(list(images_dir.glob("*.jpg")))
+    total_labels = 0
+    if labels_dir.exists():
+        for lf in labels_dir.glob("*.txt"):
+            total_labels += sum(1 for _ in open(lf))
+    
+    return {
+        "total_images": total_images,
+        "total_labels": total_labels,
+        "ready_to_train": total_labels >= 50,
+        "path": str(TRAIN_DIR)
+    }
+
+
+# ============================================================
+# PRE-LABEL: Use Gemini to auto-detect products in FOXPRODUCTOS
+# ============================================================
+@router.post("/pre-label-folder")
+async def pre_label_folder(payload: dict = {}):
+    """Pre-label all images in FOXPRODUCTOS using Gemini Vision."""
+    import glob
+    
+    folder = payload.get("folder", os.path.expanduser("~/Escritorio/FOXPRODUCTOS"))
+    
+    if not os.path.isdir(folder):
+        raise HTTPException(400, f"Folder not found: {folder}")
+    
+    images = sorted(
+        glob.glob(os.path.join(folder, "*.jpg")) +
+        glob.glob(os.path.join(folder, "*.jpeg")) +
+        glob.glob(os.path.join(folder, "*.png"))
+    )
+    
+    if not images:
+        raise HTTPException(400, f"No images found in {folder}")
+    
+    results = []
+    
+    for img_path in images:
+        try:
+            ai_products = await gemini_service.analyze_images([img_path])
+            
+            from PIL import Image as _PIL
+            _img = _PIL.open(img_path)
+            iw, ih = _img.size
+            
+            bboxes = []
+            for p in ai_products:
+                if p.bbox:
+                    bboxes.append({
+                        "x_pct": p.bbox.x_pct,
+                        "y_pct": p.bbox.y_pct,
+                        "w_pct": p.bbox.w_pct,
+                        "h_pct": p.bbox.h_pct,
+                        "label": p.descripcion_general[:60],
+                        "price": p.precio_unitario_cny,
+                    })
+            
+            results.append({
+                "image": os.path.basename(img_path),
+                "path": img_path,
+                "size": f"{iw}x{ih}",
+                "products_detected": len(ai_products),
+                "bboxes": bboxes,
+            })
+            
+        except Exception as e:
+            results.append({
+                "image": os.path.basename(img_path),
+                "error": str(e),
+            })
+    
+    return {
+        "folder": folder,
+        "total_images": len(images),
+        "results": results
+    }

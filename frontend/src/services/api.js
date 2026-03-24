@@ -134,3 +134,16 @@ export function connectWebSocket(projectId, userName = 'Anónimo') {
 }
 
 export default api;
+
+// ============================================================
+// TRAINING DATA
+// ============================================================
+export async function getTrainingStats() {
+  const response = await api.get('/training-stats');
+  return response.data;
+}
+
+export async function preLabelFolder(folder) {
+  const response = await api.post('/pre-label-folder', { folder });
+  return response.data;
+}
