@@ -147,11 +147,17 @@ export default function CropModal({ product, projectId, onClose, onCropApplied }
       setError('Selecciona una región más grande.');
       return;
     }
+    // Use product's project_id as fallback if projectId prop is null
+    const pid = projectId || product.project_id;
+    if (!pid) {
+      setError('No hay proyecto activo. Selecciona un proyecto primero.');
+      return;
+    }
     setLoading(true);
     setError('');
     try {
       const { manualCrop } = await import('../services/api.js');
-      const result = await manualCrop(projectId, product.id || product.uid, {
+      const result = await manualCrop(pid, product.id || product.uid, {
         x: coords.x,
         y: coords.y,
         width: coords.width,
